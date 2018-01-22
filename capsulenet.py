@@ -24,6 +24,7 @@ import matplotlib.pyplot as plt
 from utils import combine_images
 from PIL import Image
 from capsulelayers import CapsuleLayer, PrimaryCap, Length, Mask
+from keras.callbacks import EarlyStopping
 
 K.set_image_data_format('channels_last')
 
@@ -108,6 +109,15 @@ def train(model, data, args):
     checkpoint = callbacks.ModelCheckpoint(args.save_dir + '/weights-{epoch:02d}.h5', monitor='val_capsnet_acc',
                                            save_best_only=True, save_weights_only=True, verbose=1)
     lr_decay = callbacks.LearningRateScheduler(schedule=lambda epoch: args.lr * (args.lr_decay ** epoch))
+    earlyStopping=callbacks.EarlyStopping(monitor='val_loss', patience=10, verbose=0, mode='auto')
+    
+    calls = [
+            log, 
+            tb, 
+            checkpoint, 
+            lr_decay,
+            earlyStopping
+    ]
 
     # compile the model
     model.compile(optimizer=optimizers.Adam(lr=args.lr),
@@ -118,7 +128,7 @@ def train(model, data, args):
     """
     # Training without data augmentation:
     model.fit([x_train, y_train], [y_train, x_train], batch_size=args.batch_size, epochs=args.epochs,
-              validation_data=[[x_test, y_test], [y_test, x_test]], callbacks=[log, tb, checkpoint, lr_decay])
+              validation_data=[[x_test, y_test], [y_test, x_test]], callbacks=calls)
     """
 
     # Begin: Training with data augmentation ---------------------------------------------------------------------#
@@ -135,7 +145,7 @@ def train(model, data, args):
                         steps_per_epoch=int(y_train.shape[0] / args.batch_size),
                         epochs=args.epochs,
                         validation_data=[[x_test, y_test], [y_test, x_test]],
-                        callbacks=[log, tb, checkpoint, lr_decay])
+                        callbacks=calls)
     # End: Training with data augmentation -----------------------------------------------------------------------#
 
     model.save_weights(args.save_dir + '/trained_model.h5')
@@ -148,6 +158,7 @@ def train(model, data, args):
 
 
 def test(model, data, args):
+    from ml_statistics import BaseStatistics
     x_test, y_test = data
     y_pred, x_recon = model.predict(x_test, batch_size=100)
     print('-'*30 + 'Begin: test' + '-'*30)
@@ -161,6 +172,9 @@ def test(model, data, args):
     print('-' * 30 + 'End: test' + '-' * 30)
     plt.imshow(plt.imread(args.save_dir + "/real_and_recon.png"))
     plt.show()
+    
+    stats = BaseStatistics(y_test, y_pred)
+    print stats
 
 
 def manipulate_latent(model, data, args):
@@ -188,15 +202,39 @@ def manipulate_latent(model, data, args):
     print('-' * 30 + 'End: manipulate' + '-' * 30)
 
 
-def load_mnist():
+def load_dataset(organism):
     # the data, shuffled and split between train and test sets
-    from keras.datasets import mnist
-    (x_train, y_train), (x_test, y_test) = mnist.load_data()
+#    from keras.datasets import mnist
+#    (x_train, y_train), (x_test, y_test) = mnist.load_data()
+    print 'Load organism: {}'.format(organism)
+    npath, ppath = './fasta/{}_neg.fa'.format(organism), './fasta/{}_pos.fa'.format(organism)
+    print npath, ppath
+    samples = SequenceDinucProperties(npath, ppath)
+    X, y = samples.getX(), samples.getY()
+    X = X.reshape(-1, 38, 79, 1).astype('float32')
+    y = y.astype('float32')
+    print 'Input Shapes\nX: {} | y: {}'.format(X.shape, y.shape)
+    return X, y
 
-    x_train = x_train.reshape(-1, 28, 28, 1).astype('float32') / 255.
-    x_test = x_test.reshape(-1, 28, 28, 1).astype('float32') / 255.
+#    x_train = x_train.reshape(-1, 38, 79, 1).astype('float32') / 255.
+#    x_test = x_test.reshape(-1, 38, 79, 1).astypse('float32') / 255.
+#    y_train = to_categorical(y_train.astype('float32'))
+#    y_test = to_categorical(y_test.astype('float32'))
+#    return (x_train, y_train), (x_test, y_test)
+
+def load_partition(train_index, test_index, X, y):
+    # the data, shuffled and split between train and test sets
+#    from keras.datasets import mnist
+#    (x_train, y_train), (x_test, y_test) = mnist.load_data()
+    x_train = X[train_index,:]
+    y_train = y[train_index]
+    
+    x_test = X[test_index,:]
+    y_test = y[test_index]
+    
     y_train = to_categorical(y_train.astype('float32'))
     y_test = to_categorical(y_test.astype('float32'))
+    
     return (x_train, y_train), (x_test, y_test)
 
 
@@ -205,9 +243,12 @@ if __name__ == "__main__":
     import argparse
     from keras.preprocessing.image import ImageDataGenerator
     from keras import callbacks
+    from sklearn.model_selection import StratifiedKFold
+    from ml_data import SimpleHistData, DinucAutoCovarData, SequenceProteinData, SequenceNucsData, SequenceDinucProperties, SequenceMotifHot
+
 
     # setting the hyper parameters
-    parser = argparse.ArgumentParser(description="Capsule Network on MNIST.")
+    parser = argparse.ArgumentParser(description="Capsule Network for Promoter Region Classifier.")
     parser.add_argument('--epochs', default=50, type=int)
     parser.add_argument('--batch_size', default=100, type=int)
     parser.add_argument('--lr', default=0.001, type=float,
@@ -229,28 +270,36 @@ if __name__ == "__main__":
                         help="Digit to manipulate")
     parser.add_argument('-w', '--weights', default=None,
                         help="The path of the saved weights. Should be specified when testing")
+    parser.add_argument('-o', '--organism', default=None,
+                        help="The organism used for test. Generate auto path for fasta files. Should be specified when testing")
     args = parser.parse_args()
     print(args)
 
     if not os.path.exists(args.save_dir):
         os.makedirs(args.save_dir)
-
+        
     # load data
-    (x_train, y_train), (x_test, y_test) = load_mnist()
+    X, y = load_dataset(args.organism)
+    
+    kf = StratifiedKFold(n_splits=10, shuffle=True, random_state=34267)
+    kf.get_n_splits(X, y)
+    for train_index, test_index in kf.split(X, y):
+        (x_train, y_train), (x_test, y_test) = load_partition(train_index, test_index, X, y)
+        
 
-    # define model
-    model, eval_model, manipulate_model = CapsNet(input_shape=x_train.shape[1:],
-                                                  n_class=len(np.unique(np.argmax(y_train, 1))),
-                                                  routings=args.routings)
-    model.summary()
-
-    # train or test
-    if args.weights is not None:  # init the model weights with provided one
-        model.load_weights(args.weights)
-    if not args.testing:
-        train(model=model, data=((x_train, y_train), (x_test, y_test)), args=args)
-    else:  # as long as weights are given, will run testing
-        if args.weights is None:
-            print('No weights are provided. Will test using random initialized weights.')
-        manipulate_latent(manipulate_model, (x_test, y_test), args)
-        test(model=eval_model, data=(x_test, y_test), args=args)
+        # define model
+        model, eval_model, manipulate_model = CapsNet(input_shape=x_train.shape[1:],
+                                                      n_class=len(np.unique(np.argmax(y_train, 1))),
+                                                      routings=args.routings)
+        model.summary()
+    
+        # train or test
+        if args.weights is not None:  # init the model weights with provided one
+            model.load_weights(args.weights)
+        if not args.testing:
+            train(model=model, data=((x_train, y_train), (x_test, y_test)), args=args)
+        else:  # as long as weights are given, will run testing
+            if args.weights is None:
+                print('No weights are provided. Will test using random initialized weights.')
+            manipulate_latent(manipulate_model, (x_test, y_test), args)
+            test(model=eval_model, data=(x_test, y_test), args=args)
